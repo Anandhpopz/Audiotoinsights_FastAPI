@@ -1,0 +1,134 @@
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.responses import JSONResponse, FileResponse
+import os
+# Load .env automatically when present (optional)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    # python-dotenv is optional; environment variables can be set externally
+    pass
+from google import genai
+from .function import nlp_pipeline
+import pandas as pd
+from io import BytesIO
+
+app = FastAPI(title="FastAPI Audio Transcription & Summarization")
+
+MODEL_NAME = "gemini-2.5-flash"
+
+
+# --- Lazy Gemini client initialization ---
+def get_genai_client():
+    """Return a genai.Client, constructing it on first use.
+
+    This avoids requiring credentials at module import time which
+    prevents uvicorn from failing to import the app when credentials
+    are not configured in the environment during development.
+    """
+    # Prefer an explicit API key from environment for safety
+    api_key = (
+        os.getenv("GENAI_API_KEY")
+        or os.getenv("GEMINI_API_KEY")
+        or os.getenv("GOOGLE_API_KEY")
+        or os.getenv("API_KEY")
+    )
+    if not api_key:
+        raise RuntimeError(
+            "GENAI API key not found. Set the environment variable GENAI_API_KEY before calling the endpoint."
+        )
+    try:
+        return genai.Client(api_key=api_key)
+    except Exception as e:
+        raise RuntimeError(f"Error initializing Gemini client: {e}") from e
+
+# --- Prompt for summarization ---
+PROMPT = (
+    "**Prompt for AI Transcription and Summarization:** "
+    "Transcribe the provided audio file accurately, ensuring to capture all spoken words and nuances. "
+    "Once the transcription is complete, summarize the content in clear, coherent English sentences. "
+    "The summary should encapsulate the main ideas and key points discussed in the audio "
+    "while maintaining proper sentence structure and grammatical correctness. "
+    "The final output should consist solely of the English summary, "
+    "devoid of any transcription details or audio references."
+)
+
+
+@app.post("/process_audio")
+async def process_audio(file: UploadFile = File(...)):
+    """Endpoint: upload audio file, process it, and return transcription + Excel insights"""
+
+    # --- Step 1: Save uploaded file temporarily ---
+    temp_dir = "temp_audio"
+    os.makedirs(temp_dir, exist_ok=True)
+    temp_path = os.path.join(temp_dir, file.filename)
+
+    try:
+        with open(temp_path, "wb") as f:
+            f.write(await file.read())
+
+        # --- Step 2: Upload audio to Gemini ---
+        client = get_genai_client()
+        audio_file = client.files.upload(file=temp_path)
+
+        # --- Step 3: Generate transcription + summary ---
+        response = client.models.generate_content(
+            model=MODEL_NAME,
+            contents=[PROMPT, audio_file]
+        )
+        result_text = response.text
+
+        # --- Step 4: NLP insights ---
+        insights = nlp_pipeline(result_text)
+
+        df = pd.DataFrame({
+            "Key": insights.keys(),
+            "Value": [str(v) for v in insights.values()]
+        })
+
+        # Convert to Excel in memory
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            df.to_excel(writer, index=False, sheet_name="Insights")
+        output.seek(0)
+
+        # --- Step 5: Build JSON response ---
+        response_data = {
+            "summary": result_text,
+            "download_url": f"/download_excel/{file.filename}"
+        }
+
+        # Save Excel temporarily for download
+        excel_path = os.path.join(temp_dir, f"{file.filename}_insights.xlsx")
+        with open(excel_path, "wb") as excel_file:
+            excel_file.write(output.getvalue())
+
+        return JSONResponse(content=response_data)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    finally:
+        # cleanup temporary file
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        try:
+            if 'client' in locals() and audio_file is not None:
+                client.files.delete(name=audio_file.name)
+        except Exception:
+            pass
+
+
+@app.get("/download_excel/{filename}")
+async def download_excel(filename: str):
+    """Download generated Excel file"""
+    file_path = os.path.join("temp_audio", f"{filename}_insights.xlsx")
+    if os.path.exists(file_path):
+        return FileResponse(file_path, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    else:
+        raise HTTPException(status_code=404, detail="File not found")
+
+
+@app.get("/")
+async def root():
+    return {"message": "FastAPI - Audio Transcription & Summarization API"}
