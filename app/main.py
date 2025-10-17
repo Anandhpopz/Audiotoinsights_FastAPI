@@ -42,15 +42,19 @@ def get_genai_client():
     except Exception as e:
         raise RuntimeError(f"Error initializing Gemini client: {e}") from e
 
-# --- Prompt for summarization ---
-PROMPT = (
-    "**Prompt for AI Transcription and Summarization:** "
-    "Transcribe the provided audio file accurately, ensuring to capture all spoken words and nuances. "
-    "Once the transcription is complete, summarize the content in clear, coherent English sentences. "
-    "The summary should encapsulate the main ideas and key points discussed in the audio "
-    "while maintaining proper sentence structure and grammatical correctness. "
-    "The final output should consist solely of the English summary, "
-    "devoid of any transcription details or audio references."
+# --- Prompts for transcription and summarization ---
+TRANSCRIPTION_PROMPT = (
+    "Transcribe the provided audio file accurately with timestamps. "
+    "For each spoken segment, include the start time in [MM:SS] format at the beginning of the line. "
+    "Example format:\n"
+    "[00:00] Speaker: Hello, welcome to the meeting\n"
+    "[00:05] Speaker: Today we'll discuss...\n"
+    "Ensure accurate timing and capture all spoken words, including speaker changes if identifiable."
+)
+
+SUMMARY_PROMPT = (
+    "Based on the transcription, provide a clear and coherent summary of the main points and key takeaways. "
+    "The summary should be well-structured and highlight the most important information discussed in the audio."
 )
 
 
@@ -71,15 +75,22 @@ async def process_audio(file: UploadFile = File(...)):
         client = get_genai_client()
         audio_file = client.files.upload(file=temp_path)
 
-        # --- Step 3: Generate transcription + summary ---
-        response = client.models.generate_content(
+        # --- Step 3: Generate transcription with timestamps ---
+        transcription_response = client.models.generate_content(
             model=MODEL_NAME,
-            contents=[PROMPT, audio_file]
+            contents=[TRANSCRIPTION_PROMPT, audio_file]
         )
-        result_text = response.text
+        transcription = transcription_response.text
 
-        # --- Step 4: NLP insights ---
-        insights = nlp_pipeline(result_text)
+        # --- Step 4: Generate summary ---
+        summary_response = client.models.generate_content(
+            model=MODEL_NAME,
+            contents=[SUMMARY_PROMPT, transcription]
+        )
+        summary = summary_response.text
+
+        # --- Step 5: NLP insights ---
+        insights = nlp_pipeline(summary)
 
         df = pd.DataFrame({
             "Key": insights.keys(),
@@ -90,11 +101,18 @@ async def process_audio(file: UploadFile = File(...)):
         output = BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
             df.to_excel(writer, index=False, sheet_name="Insights")
+            
+            # Add transcription sheet with timestamps
+            transcription_df = pd.DataFrame({
+                "Transcription": [transcription]
+            })
+            transcription_df.to_excel(writer, index=False, sheet_name="Transcription")
         output.seek(0)
 
-        # --- Step 5: Build JSON response ---
+        # --- Step 6: Build JSON response ---
         response_data = {
-            "summary": result_text,
+            "transcription": transcription,
+            "summary": summary,
             "download_url": f"/download_excel/{file.filename}"
         }
 
