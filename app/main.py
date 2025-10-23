@@ -53,8 +53,7 @@ TRANSCRIPTION_PROMPT = (
 )
 
 SUMMARY_PROMPT = (
-    "Based on the transcription, provide a clear and coherent summary of the main points and key takeaways. "
-    "The summary should be well-structured and highlight the most important information discussed in the audio."
+    """Extract the following information from the provided conversation text: 1.**Room Type**: Identify and extract the type of room being discussed (e.g., single, double, shared).2.**Cost**: Determine the cost associated with the room or accommodation mentioned.3.**Location**: Extract the geographical location of the accommodation.4.**Status of Inhabitant**: Specify whether the tenant is a student or a working professional, and if applicable, include the name of the company or institution they are associated with.5.**Required Amenities**: List any specific amenities that the tenant requires or is looking for in the accommodation (e.g., Wi-Fi, laundry, kitchen access).6.**Alternative Suggestions**: Note any other hostel or accommodation options suggested to the tenant by the landlord during the conversation.Ensure that the extraction is accurate and concise, providing clear labels for each piece of information collected."""
 )
 
 
