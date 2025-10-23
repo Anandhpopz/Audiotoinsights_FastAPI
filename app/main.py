@@ -59,74 +59,78 @@ SUMMARY_PROMPT = (
 
 @app.post("/process_audio")
 async def process_audio(file: UploadFile = File(...)):
-    """Endpoint: upload audio file, process it, and return transcription + Excel insights"""
+    """Upload audio file, transcribe it, and extract structured insights"""
 
-    # --- Step 1: Save uploaded file temporarily ---
     temp_dir = "temp_audio"
     os.makedirs(temp_dir, exist_ok=True)
     temp_path = os.path.join(temp_dir, file.filename)
 
     try:
+        # Save uploaded file temporarily
         with open(temp_path, "wb") as f:
             f.write(await file.read())
 
-        # --- Step 2: Upload audio to Gemini ---
+        # Initialize Gemini client
         client = get_genai_client()
         audio_file = client.files.upload(file=temp_path)
 
-        # --- Step 3: Generate transcription with timestamps ---
+        # --- Step 1: Transcription ---
+        transcription_prompt = (
+            "Transcribe the provided audio file accurately with timestamps. "
+            "Format example:\n[00:00] Speaker: Hello\n[00:05] Speaker: Welcome..."
+        )
         transcription_response = client.models.generate_content(
             model=MODEL_NAME,
-            contents=[TRANSCRIPTION_PROMPT, audio_file]
+            contents=[transcription_prompt, audio_file]
         )
         transcription = transcription_response.text
 
-        # --- Step 4: Generate summary ---
-        summary_response = client.models.generate_content(
+        # --- Step 2: Structured extraction ---
+        extraction_prompt = f"""
+Extract the following information from the conversation text. 
+Provide JSON output with keys: RoomType, Cost, Location, StatusOfInhabitant, RequiredAmenities, AlternativeSuggestions.
+
+Conversation Text:
+{transcription}
+"""
+        extraction_response = client.models.generate_content(
             model=MODEL_NAME,
-            contents=[SUMMARY_PROMPT, transcription]
+            contents=[extraction_prompt]
         )
-        summary = summary_response.text
+        structured_text = extraction_response.text
 
-        # --- Step 5: NLP insights ---
-        insights = nlp_pipeline(summary)
+        # --- Step 3: Convert JSON string to Python dict ---
+        import json
+        try:
+            insights = json.loads(structured_text)
+        except json.JSONDecodeError:
+            # fallback if model doesn't return perfect JSON
+            insights = {"raw_extraction": structured_text}
 
-        df = pd.DataFrame({
+        # --- Step 4: Save to Excel ---
+        df_insights = pd.DataFrame({
             "Key": insights.keys(),
             "Value": [str(v) for v in insights.values()]
         })
 
-        # Convert to Excel in memory
         output = BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-            df.to_excel(writer, index=False, sheet_name="Insights")
-            
-            # Add transcription sheet with timestamps
-            transcription_df = pd.DataFrame({
-                "Transcription": [transcription]
-            })
-            transcription_df.to_excel(writer, index=False, sheet_name="Transcription")
+            df_insights.to_excel(writer, index=False, sheet_name="Insights")
+            df_transcription = pd.DataFrame({"Transcription": [transcription]})
+            df_transcription.to_excel(writer, index=False, sheet_name="Transcription")
         output.seek(0)
 
-        # --- Step 6: Build JSON response ---
-        response_data = {
-            "transcription": transcription,
-            "summary": summary,
-            "download_url": f"/download_excel/{file.filename}"
-        }
-
-        # Save Excel temporarily for download
         excel_path = os.path.join(temp_dir, f"{file.filename}_insights.xlsx")
         with open(excel_path, "wb") as excel_file:
             excel_file.write(output.getvalue())
 
-        return JSONResponse(content=response_data)
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return JSONResponse({
+            "transcription": transcription,
+            "structured_insights": insights,
+            "download_url": f"/download_excel/{file.filename}"
+        })
 
     finally:
-        # cleanup temporary file
         if os.path.exists(temp_path):
             os.remove(temp_path)
         try:
